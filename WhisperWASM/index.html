@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dictado Local IA (Whisper + Micrófono)</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; text-align: center; }
+        .card { border: 1px solid #ddd; padding: 30px; border-radius: 12px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); }
+        button { padding: 15px 25px; font-size: 16px; margin: 10px; cursor: pointer; border-radius: 8px; border: none; font-weight: bold; transition: 0.2s; }
+        #btn-record { background: #d9534f; color: white; }
+        #btn-record.recording { background: #dc3545; animation: pulse 1.5s infinite; }
+        button:disabled { background: #ccc; cursor: not-allowed; color: #666; }
+        textarea { width: 100%; margin-top: 20px; padding: 15px; box-sizing: border-box; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; resize: vertical; background: #f9f9f9; }
+        #status { margin: 20px 0; font-weight: bold; color: #0056b3; min-height: 24px; }
+        audio { width: 100%; margin-top: 20px; outline: none; }
+        select { padding: 10px; font-size: 16px; border-radius: 8px; border: 1px solid #ccc; margin-bottom: 10px; width: 100%; box-sizing: border-box; }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.7); }
+            70% { transform: scale(1.05); box-shadow: 0 0 0 10px rgba(220, 53, 69, 0); }
+            100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(220, 53, 69, 0); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2>🎙️ Dictado con IA</h2>
+        <p>100% Local. Procesado en tu dispositivo.</p>
+
+        <label for="model-select" style="display:block; text-align:left; margin-bottom:5px; font-weight:bold;">Elige la precisión del modelo:</label>
+        <select id="model-select">
+            <option value="Xenova/whisper-tiny">Tiny (~40MB) - Muy rápido, menor precisión</option>
+            <option value="Xenova/whisper-base" selected>Base (~150MB) - Equilibrado (Recomendado)</option>
+            <option value="Xenova/whisper-small">Small (~500MB) - Lento, alta precisión</option>
+        </select>
+
+        <div id="status">⏳ Iniciando...</div>
+
+        <button id="btn-record" disabled>🔴 Iniciar Grabación</button>
+        
+        <audio id="audio-playback" controls style="display: none;"></audio>
+
+        <textarea id="output" rows="6" placeholder="La transcripción aparecerá aquí..."></textarea>
+    </div>
+
+    <script type="module">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.0';
+        env.allowLocalModels = false;
+
+        const btnRecord = document.getElementById('btn-record');
+        const statusEl = document.getElementById('status');
+        const outputEl = document.getElementById('output');
+        const audioPlayback = document.getElementById('audio-playback');
+        // NUEVO: Referencia al selector
+        const modelSelect = document.getElementById('model-select');
+
+        let transcriber = null;
+        let mediaRecorder;
+        let audioChunks = [];
+        let isRecording = false;
+
+        // 1. Función para cargar el modelo seleccionado
+        async function loadModel() {
+            const modelName = modelSelect.value;
+            const shortName = modelName.split('-')[1].toUpperCase(); // Extrae "TINY", "BASE" o "SMALL"
+
+            // Bloqueamos la interfaz mientras carga
+            btnRecord.disabled = true;
+            modelSelect.disabled = true;
+            statusEl.innerText = `⏳ Descargando/Cargando modelo ${shortName}...`;
+            statusEl.style.color = "#0056b3";
+
+            try {
+                transcriber = await pipeline('automatic-speech-recognition', modelName);
+                statusEl.innerText = `✅ Modelo ${shortName} listo. Presiona para hablar.`;
+                statusEl.style.color = "green";
+                btnRecord.disabled = false;
+            } catch (error) {
+                console.error(error);
+                statusEl.innerText = "❌ Error cargando la IA.";
+                statusEl.style.color = "red";
+            } finally {
+                // Volvemos a permitir cambiar de modelo una vez que termine
+                modelSelect.disabled = false;
+            }
+        }
+
+        // NUEVO: Escuchar cambios en el selector para recargar el modelo
+        modelSelect.addEventListener('change', loadModel);
+
+        // Cargar el modelo por defecto (Base) al abrir la página
+        loadModel();
+
+        // 2. Lógica de grabación y transcripción
+        btnRecord.addEventListener('click', async () => {
+            if (isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+                btnRecord.innerText = "🔴 Iniciar Grabación";
+                btnRecord.classList.remove("recording");
+                btnRecord.disabled = true; 
+                return;
+            }
+
+            try {
+                if (!mediaRecorder) {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+
+                    mediaRecorder.ondataavailable = (e) => {
+                        if (e.data.size > 0) audioChunks.push(e.data);
+                    };
+
+                    mediaRecorder.onstop = async () => {
+                        statusEl.innerText = "🧠 Pensando... (Procesando audio localmente)";
+                        statusEl.style.color = "#f0ad4e";
+                        
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                        audioChunks = []; 
+
+                        const audioUrl = URL.createObjectURL(audioBlob);
+                        audioPlayback.src = audioUrl;
+                        audioPlayback.style.display = 'block';
+
+                        await processAudioConWhisper(audioBlob);
+                    };
+                }
+
+                audioPlayback.style.display = 'none';
+                
+                mediaRecorder.start();
+                isRecording = true;
+                btnRecord.innerText = "⏹️ Detener y Transcribir";
+                btnRecord.classList.add("recording");
+                statusEl.innerText = "🎤 Escuchando...";
+                statusEl.style.color = "red";
+                outputEl.value = "";
+                
+                // Evitamos que el usuario cambie de modelo en mitad de una grabación
+                modelSelect.disabled = true;
+
+            } catch (err) {
+                console.error("Error de micrófono:", err);
+                statusEl.innerText = "❌ Necesitas dar permisos de micrófono.";
+            }
+        });
+
+        // 3. El "Puente": Convertir WebM a 16kHz y enviarlo a Whisper
+        async function processAudioConWhisper(blob) {
+            try {
+                const arrayBuffer = await blob.arrayBuffer();
+
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+                const audioData = audioBuffer.getChannelData(0);
+
+                const result = await transcriber(audioData, {
+                    language: 'spanish',
+                    task: 'transcribe',
+                });
+
+                outputEl.value = result.text.trim();
+                statusEl.innerText = "✅ Transcripción completada.";
+                statusEl.style.color = "green";
+
+            } catch (error) {
+                console.error("Error procesando:", error);
+                statusEl.innerText = "❌ Error procesando el audio.";
+                statusEl.style.color = "red";
+            } finally {
+                btnRecord.disabled = false; 
+                modelSelect.disabled = false; // Volvemos a habilitar el cambio de modelo
+            }
+        }
+    </script>
+</body>
+</html>
